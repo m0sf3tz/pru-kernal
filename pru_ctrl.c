@@ -18,6 +18,7 @@
 
 #define FIRST_MINOR 0
 #define MINOR_CNT 1
+#define DATA_INSTRUCTION_LENGHT 8192
  
 static dev_t dev;
 static struct cdev c_dev;
@@ -53,6 +54,8 @@ static long my_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
     void __iomem * PRU1_IRAM_OFFSET; 
     
     void __iomem * PRU0_CTRL; 
+    
+    void __iomem * PIN_MAPPINGS; 
     
     u32 c;
     u32 s;
@@ -143,15 +146,14 @@ static long my_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
                 return ENOMEM;
             
                        
-            t = copy_from_user(buf, (char *)arg, 2*1024);
+            t = copy_from_user(buf, (char *)arg, 8*1024);
             
             if(t != 0)
                 printk("failed to copy some stuff from userspace into kernal space ;( \n");
 
-            //PRU0_IRAM_OFFSET = ioremap(0x4A334000, 8*1024);
             PRU0_IRAM_OFFSET = ioremap(SOC_PRUICSS1_REGS + SOC_PRUICSS_PRU0_IRAM_OFFSET, 8*1024);
             
-            memcpy(PRU0_IRAM_OFFSET, (void __force *) buf, 2*1024);
+            memcpy(PRU0_IRAM_OFFSET, (void __force *) buf, 8*1024);
                         
             iounmap(PRU0_IRAM_OFFSET);
             
@@ -167,14 +169,14 @@ static long my_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
                 return ENOMEM;
             
                        
-            t = copy_from_user(buf, (char *)arg, 2*1024);
+            t = copy_from_user(buf, (char *)arg, 8*1024);
             
             if(t != 0)
                 printk("failed to copy some stuff from userspace into kernal space ;( \n");
 
             PRU0_DRAM_OFFSET = ioremap(SOC_PRUICSS1_REGS + SOC_PRUICSS_PRU0_DRAM_OFFSET, 8*1024);
             
-            memcpy(PRU0_DRAM_OFFSET, (void __force *) buf, 2*1024);
+            memcpy(PRU0_DRAM_OFFSET, (void __force *) buf, 8*1024);
                         
             iounmap(PRU0_DRAM_OFFSET);
             
@@ -189,6 +191,19 @@ static long my_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
             iounmap(PRU0_IRAM_OFFSET);
             printk("Done starting execution \n");
             break;
+            
+       case PRU_UART_CONFIGURE_PINS:
+            printk("Starting to configure uart PINS\n");
+            PIN_MAPPINGS = ioremap( (0x44e10000+0x954), sizeof(u32));        
+            //writel_relaxed(0x49, PIN_MAPPINGS);                                               //tx... 1001001
+            writel_relaxed(0x51, PIN_MAPPINGS);                                                 //tx... 1010001
+            iounmap(PIN_MAPPINGS);
+            
+            PIN_MAPPINGS = ioremap( (0x44e10000+0x950), sizeof(u32));        
+            writel_relaxed(0x69, PIN_MAPPINGS);                                                 //tx... 1101001
+            iounmap(PIN_MAPPINGS);
+            printk("Done configuration of UART pins \n");
+            break;            
             
         default:
             return -EINVAL;
