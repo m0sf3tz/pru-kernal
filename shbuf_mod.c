@@ -95,26 +95,7 @@ static void wrap_around_memget(char * dest, uint32_t len)
 }
 
 
-static int circular_buf_used()
-{
-    getHeadLock();
-    uint32_t head = *SHBUF0_HEAD_OFFSET_VA;
-    putHeadLock();
 
-    getTailLock();
-    uint32_t tail = *SHBUF0_TAIL_OFFSET_VA;
-    putTailLock();       
-
-    if(head > tail)
-        return ((head - tail) - 1);
-
-    else if(head < tail)
-        return ( buffSize + head - tail );
-
-    else
-        return -1;
-
-}
 static int circular_buf_space()
 {
     getHeadLock();
@@ -146,36 +127,23 @@ static ssize_t shbuf_read(struct file * f , char * dest , size_t len , loff_t * 
 
     u32 used;
     int ret;
-#if DEBUG_PRINTK
-
-#endif
+    int size;
    
-    ret = -1;
+    ret = 0;
     
-    used = circular_buf_used();
+    if(circular_buf_space() == SHBUF0_SIZE)
+        return ret;
     
-    if(used == 0)
-        return 0;
-    if(len > used)
-        len = used; 
-    
-    
-    dmb();
-    /*
-    int x = 20000;
-    while(x--){
-        asm volatile ("nop");
-    }
-    */
-    
+    size = SHBUF0_SIZE - circular_buf_space() - 1;
+      
+    //if buffer has 5 elements in it, and we want to read 8, read 5 so we don't underflow  
+    if(len > size)
+        len = size;     
+        
     wrap_around_memget(tempBuff, len);
         
     circular_buf_next_tail(len);
     
-    dmb();    
-
-    
-
     if(copy_to_user(dest, (void*)tempBuff,len)){
         printk("Failed to flush buffer to user space - unhandled exception' \n");
         return -EIO;
