@@ -17,6 +17,7 @@
 #include "hw_cm_per.h"
 #include "soc_AM335x.h"
 #include "sharedVariables.h"
+#include "constants.h"
 
 #define FIRST_MINOR 0
 #define MINOR_CNT 1
@@ -28,30 +29,28 @@ static dev_t dev;
 static struct cdev c_dev;
 static struct class *cl;
 
-static uint32_t __iomem* SPINLOCK_PRU_HEAD_VA;
-static uint32_t __iomem* SPINLOCK_ARM_TAIL_VA;
 
 static uint32_t __iomem* SHBUF0_START_VA;
-static uint32_t __iomem* SHBUF0_HEAD_OFFSET_VA;
-static uint32_t __iomem* SHBUF0_TAIL_OFFSET_VA;
-  
-static u32* sharedHead; //shared w/ PRU
-static u32* sharedtail; //shared w/ PRU
-static u32* zeroth; 
-static const u32  buffSize = SHBUF0_SIZE; 
+static uint32_t __iomem* SHBUF1_START_VA;
+static uint32_t __iomem* SHBUF2_START_VA;
+static uint32_t __iomem* SHBUF3_START_VA;
+static uint32_t __iomem* SHBUF4_START_VA;
+static uint32_t __iomem* SHBUF_CTRL_BLOCK_VA;
+static uint32_t __iomem* SPINLOCK_BUFFER_VA;
 
+
+
+static const u32  buffSize = SHBUF_SIZE; 
 char * tempBuff;
 
-static void getHeadLock();
-static void putHeadLock();
-static void getTailLock();
-static void putTailLock();
+static void putBuffLock();
+static void getBuffLock();
 
-static void circular_buf_next_tail(uint32_t get);
+static u8 getFullBuffer();
+static u8 clearBufferUsed(u8);
+
 static int my_open(struct inode *i, struct file *f);
 static int my_close(struct inode *i, struct file *f);
-static void wrap_around_memget(char * dest, uint32_t len);
-static int circular_buf_space();
 static ssize_t shbuf_read(struct file * f , char * dest , size_t len , loff_t * t);
 
 
@@ -65,91 +64,82 @@ static int my_close(struct inode *i, struct file *f)
 }
 
 
-void circular_buf_next_tail(uint32_t get)
+static u8 getFullBuffer()
 {
-    getTailLock();
-    //printk("bofore tail is at %u \n", *SHBUF0_TAIL_OFFSET_VA);
-    *SHBUF0_TAIL_OFFSET_VA = (*SHBUF0_TAIL_OFFSET_VA + get)%buffSize;
-    //printk("after tail is at %u \n", *SHBUF0_TAIL_OFFSET_VA);
-    putTailLock();
-}
+    getBuffLock();
 
-static void wrap_around_memget(char * dest, uint32_t len)
-{
-    getTailLock();
-    uint32_t tail = *SHBUF0_TAIL_OFFSET_VA;
-    putTailLock();    
-    
-    if(tail + len <= (buffSize)){
-        memcpy((void*)dest, (void*)((uint32_t)tail + (uint32_t)SHBUF0_START_VA), len);
-    }
-        else
+    int iter;
+    uint32_t * iterPter = (uint32_t *)SHBUF_CTRL_BLOCK_VA;
+
+    for(iter = 0; iter <= SHBUF_TOTAL_BUFS; iter++)
     {
-        
-        uint32_t lenTop = (buffSize- tail);
-        uint32_t lenBot = (tail + len) % buffSize;;
+        if (iter == SHBUF_TOTAL_BUFS)
+        {
+            putBuffLock();
+            return ERROR_GETTING_BUFFER;
+        }
 
-        memcpy((void*)(dest)                 , (void*)(tail   + (uint32_t)SHBUF0_START_VA), lenTop);
-        memcpy((void*)((uint32_t)dest+lenTop), (void*)(SHBUF0_START_VA),                    lenBot);
+        if(*iterPter == SHARED_BUFFER_TAKEN)
+        {
+            putBuffLock();
+            return iter;
+        }
+
+        iterPter++;
     }
+
+    putBuffLock();
+    return ERROR_GETTING_BUFFER; //error condition
 }
 
 
-
-static int circular_buf_space()
+static u8 clearBufferUsed(u8 buffer)
 {
-    getHeadLock();
-    uint32_t head = *SHBUF0_HEAD_OFFSET_VA;
-    putHeadLock();
+    getBuffLock();
 
-    getTailLock();
-    uint32_t tail = *SHBUF0_TAIL_OFFSET_VA;
-    putTailLock();       
-    
-    //printk("head value is at %u \n", *SHBUF0_HEAD_OFFSET_VA);
-    //printk("tail value is at %u \n", *SHBUF0_TAIL_OFFSET_VA);
-           
-    if(head == tail)
-        return buffSize;
+    //sanitize input
+    if(buffer > SHBUF_TOTAL_BUFS)
+    {
+        printk("critical error in clearBufferUsed, buffer out of bounds \n"); 
+    }
 
-    else if(head > tail)
-        return (buffSize - (head - tail) - 1);
+    uint32_t * bufPtr = (uint32_t *)SHBUF_CTRL_BLOCK_VA;
 
-    else if(head < tail)
-        return (tail - head) - 1;
+    bufPtr = bufPtr + buffer;
 
-    else
-        return -1;
+    *bufPtr = SHARED_BUFFER_FREE;
+
+    putBuffLock();
 
 }
 
-static ssize_t shbuf_read(struct file * f , char * dest , size_t len , loff_t * t){
-
-    u32 used;
-    int ret;
-    int size;
-   
-    ret = 0;
+static ssize_t shbuf_read(struct file * f , char * dest , size_t len , loff_t * t)
+{
     
-    if(circular_buf_space() == SHBUF0_SIZE)
-        return ret;
+    u8 freeBuffer = getFullBuffer();
     
-    size = SHBUF0_SIZE - circular_buf_space() - 1;
-      
-    //if buffer has 5 elements in it, and we want to read 8, read 5 so we don't underflow  
-    if(len > size)
-        len = size;     
-        
-    wrap_around_memget(tempBuff, len);
-        
-    circular_buf_next_tail(len);
+    if(freeBuffer == ERROR_GETTING_BUFFER)
+    {
+        #if DEBUG_PRINTK
+        printk("All buffers are empty \n");
+        #endif //DEBUG_PRINTK
+        return 0;
+    }
     
-    if(copy_to_user(dest, (void*)tempBuff,len)){
+    printk("reading something... \n");
+    
+    
+    //calculate the shared buffer offset into DRAM to copy to user space
+    u32 bufferCopy = SHBUF0_START_VA + freeBuffer*SHBUF_SIZE;
+    
+    if(copy_to_user(dest, (void*)bufferCopy,TOTAL_BYTES_IN_SECTOR)){
         printk("Failed to flush buffer to user space - unhandled exception' \n");
         return -EIO;
     }  
+    
+    clearBufferUsed(freeBuffer);
 
-    return len;
+    return TOTAL_BYTES_IN_SECTOR;
 }
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,35))
@@ -177,8 +167,8 @@ static long my_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
             }
             
             //release locks
-            putHeadLock();
-            putTailLock();
+            putBuffLock();
+
             
             printk("finished resetting SPINLOCK block \n");
             break;  
@@ -235,15 +225,17 @@ static int __init shbuf_init(void)
         return PTR_ERR(dev_ret);
     }
  
- 
-    SPINLOCK_PRU_HEAD_VA    = ioremap_nocache (SPINLOCK_PRU_HEAD, sizeof(u32));
-    SPINLOCK_ARM_TAIL_VA    = ioremap_nocache (SPINLOCK_ARM_TAIL, sizeof(u32));
 
-    SHBUF0_START_VA          = ioremap_nocache (SHBUF0_START           , SHBUF0_SIZE);
-    SHBUF0_HEAD_OFFSET_VA    = ioremap_nocache (SHBUF0_HEAD_OFFSET     , sizeof(u32));
-    SHBUF0_TAIL_OFFSET_VA    = ioremap_nocache (SHBUF0_TAIL_OFFSET     , sizeof(u32)); 
- 
-    tempBuff = kmalloc( SHBUF0_SIZE , GFP_KERNEL);
+    SHBUF0_START_VA          = ioremap_nocache (SHBUF0_START_PA         , SHBUF_SIZE);
+    SHBUF1_START_VA          = ioremap_nocache (SHBUF1_START_PA         , SHBUF_SIZE);
+    SHBUF2_START_VA          = ioremap_nocache (SHBUF2_START_PA         , SHBUF_SIZE);
+    SHBUF3_START_VA          = ioremap_nocache (SHBUF2_START_PA         , SHBUF_SIZE);
+    SHBUF4_START_VA          = ioremap_nocache (SHBUF3_START_PA         , SHBUF_SIZE);
+    
+    SHBUF_CTRL_BLOCK_VA      = ioremap_nocache (SHBUF_CTRL_BLOCK_PA     , SHBUF_TOTAL_BUFS*sizeof(u32));
+    SPINLOCK_BUFFER_VA       = ioremap_nocache (SPINLOCK_BUFFER_PA, sizeof(u32));
+    
+    tempBuff = kmalloc( SHBUF_SIZE , GFP_KERNEL);
     
     return 0;
 }
@@ -251,12 +243,13 @@ static int __init shbuf_init(void)
   
 static void __exit shbuf_exit(void)
 {
-    iounmap(SPINLOCK_PRU_HEAD_VA);
-    iounmap(SPINLOCK_ARM_TAIL_VA);
-
-    iounmap(SHBUF0_START_VA      );
-    iounmap(SHBUF0_HEAD_OFFSET_VA);
-    iounmap(SHBUF0_TAIL_OFFSET_VA);
+    iounmap(SHBUF0_START_VA);
+    iounmap(SHBUF1_START_VA);
+    iounmap(SHBUF2_START_VA);
+    iounmap(SHBUF3_START_VA); 
+    iounmap(SHBUF4_START_VA);
+    iounmap(SHBUF_CTRL_BLOCK_VA);
+    iounmap(SPINLOCK_BUFFER_VA);
     
     kfree(tempBuff);
 
@@ -267,12 +260,12 @@ static void __exit shbuf_exit(void)
 }
  
 
-static void getHeadLock(){
+static void getBuffLock(){
 #if DEBUG_PRINTK
     printk("waiting to get head lock \n");
 #endif
     int count = 2000;
-    while(*(volatile uint32_t*)SPINLOCK_PRU_HEAD_VA){
+    while(*(volatile uint32_t*)SPINLOCK_BUFFER_VA){
 #ifdef DEBUG_MERCY
         count--;
         if(count == 0){
@@ -288,42 +281,15 @@ static void getHeadLock(){
 #endif
 }
 
-static void putHeadLock(){
+static void putBuffLock(){
 #if DEBUG_PRINTK
     printk("Put back Head lock \n");
 #endif
 
-    (*(volatile uint32_t*)SPINLOCK_PRU_HEAD_VA) = 0;
+    (*(volatile uint32_t*)SPINLOCK_BUFFER_VA) = 0;
     dmb();
 }
 
-static void getTailLock(){
-#if DEBUG_PRINTK
-    printk("waiting to get tail lock \n");
-#endif
-    int count = 2000;
-    while(*(volatile uint32_t*)SPINLOCK_ARM_TAIL_VA){
-#ifdef DEBUG_MERCY
-        count--;
-        if(count == 0){
-            printk("failed to get tail lock \n");
-            return;
-        }
-#endif
-    }
-    dmb();
-#if DEBUG_PRINTK
-    printk("got tail lock \n");
-#endif
-}
-
-static void putTailLock(){
-#if DEBUG_PRINTK
-    printk("Put back tail lock \n");
-#endif 
-    (*(volatile uint32_t*)SPINLOCK_ARM_TAIL_VA) = 0;
-    dmb();
-}
  
  
 module_init(shbuf_init);
