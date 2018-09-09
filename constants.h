@@ -69,10 +69,8 @@
 
 //these guys are used in C programs upstreams - not used in endpoint FW
 #define NEW_TRANSMIT_HEADER_32_BITS  (0xA00BC01D)
-
 #define TRANSMIT_HEADER_32_BITS      (0x0BB11BB2)
 #define STOP_SEQUENCE_64_BITS        (0xC12CC22CC3ull)
-
 #define FINAL_STOP_SEQUENCE_64_BITS  (0xD23DD33DD4ull)
 
 
@@ -173,10 +171,8 @@
 #define LAST_TRANSMIT_SECTOR      (SECTORS_PER_SAMPLE - 1)
 
 #define TOTAL_BYTES_IN_SECTOR     (TRASMIT_BLOCK_SIZE*SECTORS_PER_SAMPLE)
-
-
 //we need to take one away to account for byte - to index offset
-#define FINAL_INDEX_SAMPLE        (TOTAL_BYTES_IN_SECTOR - 1)
+#define FINAL_INDEX_SAMPLE        (TOTAL_BYTES_IN_SECTOR - 1)  
 //********************************************************************************//
 //                VCAP targets before we kick off tasks(see notes.h)
 //********************************************************************************//
